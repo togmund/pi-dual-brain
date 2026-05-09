@@ -32,7 +32,6 @@
     "@earendil-works/pi-coding-agent": "^0.74.0",
     "@earendil-works/pi-tui": "^0.74.0",
     "@effect/language-service": "^0.85.0",
-    "typebox": "^1.1.38",
     "oxfmt": "^0.44.0",
     "oxlint": "^0.16.0",
     "typescript": "^5.7.0"
