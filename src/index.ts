@@ -154,10 +154,10 @@ export default function (pi: ExtensionAPI) {
     return {
       systemPrompt:
         event.systemPrompt +
-        `\n\n## Your Right Brain's Observation (from last turn)\n` +
+        `\n\n## Your Right Brain's Prior Thought\n` +
+        `Your right hemisphere (a distinct model with its own perspective) had this to say after the last turn:\n\n` +
         `> ${lastObservation}\n\n` +
-        `You may reference, disagree with, or ignore this. Your right brain ` +
-        `will observe this turn when you're done.`,
+        `You may build on it, disagree with it, or ignore it. It will think again after you respond.`,
     };
   });
 
@@ -203,17 +203,8 @@ export default function (pi: ExtensionAPI) {
         { deliverAs: "followUp", triggerTurn: false },
       );
 
-      // Show widget too
+      // Brief status only — the visible thread message is the real presence
       if (ctx.hasUI) {
-        const theme = ctx.ui.theme;
-        ctx.ui.setWidget(
-          WIDGET_KEY,
-          [
-            theme.fg("accent", theme.bold("🧠 right brain")),
-            theme.fg("dim", commentary),
-          ],
-          { placement: "aboveEditor" },
-        );
         ctx.ui.setStatus(
           STATUS_KEY,
           `🧠 ${commentary.slice(0, 40)}${commentary.length > 40 ? "…" : ""}`,
@@ -252,8 +243,8 @@ export default function (pi: ExtensionAPI) {
         const rightBrain = yield* RightBrain;
         const transcript = priorObservations.map((c) => `[right-brain]: ${c.commentary}`).join("\n\n");
         const full = transcript
-          ? `${transcript}\n\n--- consult ---\n\n[left]: ${params.message}`
-          : `[left]: ${params.message}`;
+          ? `${transcript}\n\n--- direct consult ---\n\n[left]: ${params.message}\n\nRespond as your own mind. Do not evaluate the left brain's question — answer it from your own perspective.`
+          : `[left]: ${params.message}\n\nRespond as your own mind.`;
         return yield* rightBrain.observe(full, params.model ?? config.model, params.persona ?? config.persona);
       }));
 

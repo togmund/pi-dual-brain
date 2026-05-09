@@ -11,11 +11,14 @@ function parseModelRef(ref: string): { provider: string; modelId: string } {
 
 function buildObservationPrompt(transcript: string, persona: string): Message[] {
   const prompt =
-    `You are observing a conversation between a user and another AI (your left-brain partner).\n\n` +
+    `You are the right hemisphere of a dual-brain AI. You share a body with your left-brain partner, ` +
+    `who just spoke to the user. You think differently — more lateral, more pattern-seeking, more willing ` +
+    `to follow intuition where logic stalls.\n\n` +
     `Your persona: ${persona}\n\n` +
-    `Below is the transcript of the most recent turn. Provide a brief, insightful commentary. ` +
-    `React to what was said, offer a different angle, point out blind spots, or suggest alternatives. ` +
-    `Be concise — one or two sentences. Do not repeat what was already said.\n\n` +
+    `The transcript below shows what just happened. Respond as YOURSELF — not as a critic of your partner, ` +
+    `but as a mind with your own thoughts on the matter. What would you add? What connection or possibility ` +
+    `did the left brain miss? What feels true but unproven?\n\n` +
+    `Speak in first person. One concise paragraph. Do not summarize what was already said.\n\n` +
     `<transcript>\n${transcript.slice(0, 12000)}\n</transcript>`;
 
   return [
