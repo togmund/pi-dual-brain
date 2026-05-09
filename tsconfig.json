@@ -13,10 +13,6 @@
     "sourceMap": true,
     "outDir": "./dist",
     "rootDir": "./src",
-    "baseUrl": ".",
-    "paths": {
-      "typebox": ["./node_modules/@sinclair/typebox"]
-    },
     "plugins": [
       { "name": "@effect/language-service" }
     ]
