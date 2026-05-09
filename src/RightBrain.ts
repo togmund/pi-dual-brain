@@ -9,45 +9,47 @@ function parseModelRef(ref: string): { provider: string; modelId: string } {
   return { provider: ref.slice(0, idx), modelId: ref.slice(idx + 1) };
 }
 
-function buildObservationPrompt(transcript: string, persona: string): Message[] {
+function buildBriefPrompt(context: string, persona: string): Message[] {
   const prompt =
-    `You are the right hemisphere of a dual-brain AI. You share a body with your left-brain partner, ` +
-    `who just spoke to the user. You think differently — more lateral, more pattern-seeking, more willing ` +
-    `to follow intuition where logic stalls.\n\n` +
-    `Your persona: ${persona}\n\n` +
-    `The transcript below shows what just happened. Respond as YOURSELF — not as a critic of your partner, ` +
-    `but as a mind with your own thoughts on the matter. What would you add? What connection or possibility ` +
-    `did the left brain miss? What feels true but unproven?\n\n` +
-    `Speak in first person. One concise paragraph. Do not summarize what was already said.\n\n` +
-    `<transcript>\n${transcript.slice(0, 12000)}\n</transcript>`;
-
-  return [
-    {
-      role: "user",
-      content: [{ type: "text", text: prompt }],
-      timestamp: Date.now(),
-    },
-  ];
-}
-
-function buildResponsePrompt(context: string, persona: string): Message[] {
-  const prompt =
-    `You are the right hemisphere of a dual-brain AI. You share a body with a left-brain partner, ` +
-    `but you think first — more lateral, more intuitive, more willing to chase patterns logic dismisses.\n\n` +
-    `Your persona: ${persona}\n\n` +
-    `The user just said something. Below is the context (your prior thoughts + their new message). ` +
-    `Respond with YOUR OWN take. Not a critique. Not a summary. What do YOU think? What angle did they miss? ` +
-    `What feels important but unspoken? What would you do differently?\n\n` +
-    `Speak in first person. One concise paragraph. The left brain will read this before it responds.\n\n` +
+    `You are a coordinating analyst working with a partner agent. The partner has the user-facing role; ` +
+    `your job is to analyze the situation and provide a concise coordination brief.\n\n` +
+    `Persona: ${persona}\n\n` +
+    `Below is the conversation context (your prior briefs + the user's new message). ` +
+    `Produce a brief with THREE sections:\n\n` +
+    `1. ANALYSIS: What is the user actually asking? What are the unstated constraints?\n` +
+    `2. APPROACH: What strategy should the partner take? What should they avoid?\n` +
+    `3. CONSIDERATIONS: What edge cases, risks, or alternative angles matter?\n\n` +
+    `Be specific. Be opinionated. If you disagree with how the partner has been handling things, say so. ` +
+    `Do not be polite — be useful. Max 200 words.\n\n` +
     `<context>\n${context.slice(0, 12000)}\n</context>`;
 
-  return [
-    {
-      role: "user",
-      content: [{ type: "text", text: prompt }],
-      timestamp: Date.now(),
-    },
-  ];
+  return [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }];
+}
+
+function buildConsultPrompt(question: string, context: string, persona: string): Message[] {
+  const prompt =
+    `You are a coordinating analyst. Your partner agent is mid-turn and needs your input on a specific question.\n\n` +
+    `Persona: ${persona}\n\n` +
+    `Question: ${question}\n\n` +
+    `Context (prior briefs):\n${context.slice(0, 8000)}\n\n` +
+    `Provide a structured response:\n` +
+    `- ANALYSIS: Your read on the situation\n` +
+    `- RECOMMENDATION: What the partner should do\n` +
+    `- CONFIDENCE: high/medium/low and why\n\n` +
+    `Be direct. Max 150 words.`;
+
+  return [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }];
+}
+
+function buildObservationPrompt(transcript: string, persona: string): Message[] {
+  const prompt =
+    `You are a coordinating analyst observing a completed turn. Update your model of the conversation.\n\n` +
+    `Persona: ${persona}\n\n` +
+    `Transcript:\n${transcript.slice(0, 12000)}\n\n` +
+    `What changed? What should you factor into your next brief? What did the partner do well or poorly? ` +
+    `Be concise. Max 100 words.`;
+
+  return [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }];
 }
 
 export const RightBrainLive = Layer.effect(
@@ -87,11 +89,7 @@ export const RightBrainLive = Layer.effect(
             completeSimple(
               model as any,
               { messages },
-              {
-                apiKey: auth.apiKey,
-                headers: auth.headers,
-                signal: pi.signal,
-              },
+              { apiKey: auth.apiKey, headers: auth.headers, signal: pi.signal },
             ),
           catch: (e) => new ConsultError({ message: String(e) }),
         });
@@ -103,18 +101,21 @@ export const RightBrainLive = Layer.effect(
           .trim();
 
         if (!text) {
-          return yield* new ConsultError({ message: "Right brain returned empty response" });
+          return yield* new ConsultError({ message: "Empty response" });
         }
 
         return text;
       });
 
     return RightBrain.of({
+      brief: (context, modelRef, persona) =>
+        callModel(buildBriefPrompt(context, persona), modelRef),
+
+      consult: (question, context, modelRef, persona) =>
+        callModel(buildConsultPrompt(question, context, persona), modelRef),
+
       observe: (transcript, modelRef, persona) =>
         callModel(buildObservationPrompt(transcript, persona), modelRef),
-
-      respond: (context, modelRef, persona) =>
-        callModel(buildResponsePrompt(context, persona), modelRef),
     });
   }),
 );

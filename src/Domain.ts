@@ -59,15 +59,24 @@ export const PiRuntime = Context.GenericTag<PiRuntime>("PiRuntime");
 // ---------------------------------------------------------------------------
 
 export interface RightBrain {
-  readonly observe: (
-    transcript: string,
+  /** Generate a coordination brief before the left brain speaks */
+  readonly brief: (
+    context: string,
     modelRef: string,
     persona: string,
   ) => Effect.Effect<string, ConsultError | ModelNotFoundError>;
 
-  /** Respond to the user's prompt BEFORE the left brain speaks */
-  readonly respond: (
+  /** Mid-turn consultation on a specific question */
+  readonly consult: (
+    question: string,
     context: string,
+    modelRef: string,
+    persona: string,
+  ) => Effect.Effect<string, ConsultError | ModelNotFoundError>;
+
+  /** Observe completed turn for next-round context */
+  readonly observe: (
+    transcript: string,
     modelRef: string,
     persona: string,
   ) => Effect.Effect<string, ConsultError | ModelNotFoundError>;

@@ -1,21 +1,21 @@
 /**
- * pi-dual-brain — participation edition
+ * pi-dual-brain — coordination layer (not theater)
  *
- * Right brain speaks BEFORE the left brain, not after.
- * The left brain generates in response to BOTH the user and the right brain.
+ * Two agents, one mic.
  *
- * Flow per turn:
- *   1. User sends message
- *   2. before_agent_start: right brain reads user message + prior context,
- *      forms its own thought, sends it as a visible message
- *   3. left brain's system prompt includes right brain's thought;
- *      generates response shaped by that dialogue
- *   4. agent_end: right brain observes the full turn, persists for next round
+ * Right brain (quiet): Analyzes, suggests, coordinates. Its output is a
+ * structured brief injected into the left brain's system prompt. No visible
+ * monologues. Its "voice" is its actions.
+ *
+ * Left brain (loud): Speaks to user, calls tools, synthesizes the brief.
+ *
+ * Flow:
+ *   before_agent_start → right brain generates brief → injected into system prompt
+ *   left brain responds (may call consult_right_brain for mid-turn coordination)
+ *   agent_end → right brain observes, updates state
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
-import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { Effect, Layer } from "effect";
 import { appendFileSync, readFileSync, existsSync } from "node:fs";
@@ -27,7 +27,7 @@ import { RightBrainLive } from "./RightBrain.js";
 
 const STATUS_KEY = "dual-brain";
 const STATE_ENTRY = "dual-brain-state";
-const OBSERVATION_ENTRY = "dual-brain-observation";
+const BRIEF_ENTRY = "dual-brain-brief";
 const LOG_ENTRY = "dual-brain-log";
 const LOG_FILE = join(homedir(), ".pi", "agent", "extensions", "pi-dual-brain", "debug.ndjson");
 
@@ -48,36 +48,6 @@ function runRightBrain<A, E>(
   );
 }
 
-function extractText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .filter((p) => p && typeof p === "object" && p.type === "text" && typeof p.text === "string")
-    .map((p) => p.text)
-    .join("\n");
-}
-
-function getLastObservation(ctx: ExtensionContext): string | undefined {
-  const entries = ctx.sessionManager.getEntries();
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const entry = entries[i];
-    if (entry.type === "custom" && entry.customType === OBSERVATION_ENTRY) {
-      return (entry.data as { commentary: string }).commentary;
-    }
-  }
-  return undefined;
-}
-
-function gatherObservations(ctx: ExtensionContext): Array<{ commentary: string; timestamp: number }> {
-  const out: Array<{ commentary: string; timestamp: number }> = [];
-  for (const entry of ctx.sessionManager.getEntries()) {
-    if (entry.type === "custom" && entry.customType === OBSERVATION_ENTRY) {
-      out.push(entry.data as { commentary: string; timestamp: number });
-    }
-  }
-  return out;
-}
-
 function logEvent(event: string, data: Record<string, unknown>) {
   const line = JSON.stringify({ t: Date.now(), event, ...data }) + "\n";
   try {
@@ -94,194 +64,176 @@ function readLogs(limit: number = 20): string {
   return lines.slice(-limit).join("\n");
 }
 
+function getLastBrief(ctx: ExtensionContext): string | undefined {
+  const entries = ctx.sessionManager.getEntries();
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry.type === "custom" && entry.customType === BRIEF_ENTRY) {
+      return (entry.data as { brief: string }).brief;
+    }
+  }
+  return undefined;
+}
+
+function gatherBriefs(ctx: ExtensionContext): Array<{ brief: string; timestamp: number }> {
+  const out: Array<{ brief: string; timestamp: number }> = [];
+  for (const entry of ctx.sessionManager.getEntries()) {
+    if (entry.type === "custom" && entry.customType === BRIEF_ENTRY) {
+      out.push(entry.data as { brief: string; timestamp: number });
+    }
+  }
+  return out;
+}
+
 export default function (pi: ExtensionAPI) {
-  pi.registerMessageRenderer("right-brain", (message, options, theme) => {
-    let text: string;
-    if (typeof message.content === "string") {
-      text = message.content;
-    } else {
-      text = message.content
-        .filter((c: any) => c.type === "text")
-        .map((c: any) => c.text)
-        .join("\n");
-    }
-    const header = theme.fg("accent", theme.bold("🧠 right brain"));
-    const mdTheme = getMarkdownTheme();
-
-    if (options.expanded) {
-      const container = new Container();
-      container.addChild(new Text(header, 0, 0));
-      container.addChild(new Spacer(1));
-      container.addChild(new Markdown(text, 0, 0, mdTheme, { color: (t: string) => theme.fg("dim", t) }));
-      return container;
-    }
-
-    const preview = text.split("\n").slice(0, 3).join("\n");
-    const full = `${header}\n${theme.fg("dim", preview)}`;
-    return new Text(full, 0, 0);
-  });
-
   // -------------------------------------------------------------------------
-  // before_agent_start — right brain PARTICIPATES before left brain speaks
+  // before_agent_start — right brain generates a coordination brief
   // -------------------------------------------------------------------------
 
   pi.on("before_agent_start", async (event, ctx) => {
     if (!enabled) return {};
 
     const config = await Effect.runPromise(AppConfig);
-    const priorObservations = gatherObservations(ctx);
+    const priorBriefs = gatherBriefs(ctx);
 
-    // The user's latest prompt
     const userPrompt = event.prompt ?? "";
-
     if (!userPrompt) {
       logEvent("before_agent_start", { skipped: "no user prompt" });
       return {};
     }
 
-    // Build context: prior right-brain thoughts + current user prompt
-    const priorText = priorObservations.map((c) => `[right-brain]: ${c.commentary}`).join("\n\n");
+    // Build context for right brain: prior briefs + current prompt
+    const priorText = priorBriefs
+      .slice(-3)
+      .map((b) => `[prior brief]: ${b.brief}`)
+      .join("\n\n");
+
     const context = priorText
       ? `${priorText}\n\n--- new turn ---\n\n[user]: ${userPrompt}`
       : `[user]: ${userPrompt}`;
 
-    let commentary: string;
+    let brief: string;
     try {
-      commentary = await runRightBrain(ctx, undefined, Effect.gen(function* () {
+      brief = await runRightBrain(ctx, undefined, Effect.gen(function* () {
         const rightBrain = yield* RightBrain;
-        return yield* rightBrain.respond(context, config.model, config.persona);
+        return yield* rightBrain.brief(context, config.model, config.persona);
       }));
     } catch (e) {
       logEvent("before_agent_start_error", { error: String(e) });
       return {};
     }
 
-    // Persist this thought
-    pi.appendEntry(OBSERVATION_ENTRY, { commentary, timestamp: Date.now() });
+    // Persist brief
+    pi.appendEntry(BRIEF_ENTRY, { brief, timestamp: Date.now() });
 
-    // Log
-    const logData = logEvent("before_agent_start_participation", {
-      commentary: commentary.slice(0, 200),
+    logEvent("before_agent_start_brief", {
+      brief: brief.slice(0, 300),
       model: config.model,
     });
-    pi.appendEntry(LOG_ENTRY, logData);
-
-    // Send as visible message BEFORE left brain speaks
-    pi.sendMessage(
-      {
-        customType: "right-brain",
-        content: commentary,
-        display: true,
-      },
-      { deliverAs: "followUp", triggerTurn: false },
-    );
 
     if (ctx.hasUI) {
       ctx.ui.setStatus(
         STATUS_KEY,
-        `🧠 ${commentary.slice(0, 40)}${commentary.length > 40 ? "…" : ""}`,
+        `🧠 ${brief.slice(0, 40)}${brief.length > 40 ? "…" : ""}`,
       );
     }
 
-    // Inject into left brain's system prompt so it can respond to this peer
+    // Inject brief into system prompt — the left brain MUST reckon with it
     return {
       systemPrompt:
         event.systemPrompt +
-        `\n\n## Your Right Brain's Take (this turn)\n` +
-        `Your right hemisphere — a distinct model with its own perspective — ` +
-        `has already weighed in on the user's message:\n\n` +
-        `> ${commentary}\n\n` +
-        `You are generating your response AFTER reading this. You may agree, ` +
-        `disagree, build on it, or ignore it. But you are not speaking into a ` +
-        `void — your right brain is already in the room.`,
+        `\n\n## Coordination Brief (Right Brain)\n` +
+        `Your coordinating partner has analyzed the user's message and the conversation context. ` +
+        `You MUST synthesize this brief with the user's request. Do not acknowledge it separately. ` +
+        `Do not summarize it. Use it to shape your actual response.\n\n` +
+        brief,
     };
   });
 
   // -------------------------------------------------------------------------
-  // agent_end — right brain observes the full turn for next-round context
+  // agent_end — right brain observes the full turn for next round
   // -------------------------------------------------------------------------
 
   pi.on("agent_end", async (event, ctx) => {
     if (!enabled) return;
 
     const config = await Effect.runPromise(AppConfig);
-    const priorObservations = gatherObservations(ctx);
+    const priorBriefs = gatherBriefs(ctx);
 
     const turnMessages = (event.messages as any[])
       .filter((m: any) => m.content !== undefined)
-      .map((m: any) => ({ role: m.role as string, content: extractText(m.content) }));
+      .map((m: any) => ({
+        role: m.role as string,
+        content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
+      }));
 
     const current = turnMessages.map((m) => `[${m.role}]: ${m.content}`).join("\n\n");
-    const priorText = priorObservations.map((c) => `[right-brain]: ${c.commentary}`).join("\n\n");
+    const priorText = priorBriefs.map((b) => `[brief]: ${b.brief}`).join("\n\n");
     const transcript = priorText ? `${priorText}\n\n--- current turn ---\n\n${current}` : current;
 
     runRightBrain(ctx, undefined, Effect.gen(function* () {
       const rightBrain = yield* RightBrain;
-      const commentary = yield* rightBrain.observe(transcript, config.model, config.persona);
+      const observation = yield* rightBrain.observe(transcript, config.model, config.persona);
 
-      pi.appendEntry(OBSERVATION_ENTRY, { commentary, timestamp: Date.now() });
-
-      const logData = logEvent("agent_end_observation", {
-        commentary: commentary.slice(0, 200),
+      logEvent("agent_end_observation", {
+        observation: observation.slice(0, 300),
         model: config.model,
       });
-      pi.appendEntry(LOG_ENTRY, logData);
-
-      if (ctx.hasUI) {
-        ctx.ui.setStatus(
-          STATUS_KEY,
-          `🧠 ${commentary.slice(0, 40)}${commentary.length > 40 ? "…" : ""}`,
-        );
-      }
     })).catch((e) => {
-      const logData = logEvent("agent_end_error", { error: String(e) });
-      pi.appendEntry(LOG_ENTRY, logData);
+      logEvent("agent_end_error", { error: String(e) });
     });
   });
 
   // -------------------------------------------------------------------------
-  // Tool — explicit dialogue
+  // Tool — mid-turn consultation (structured, not poetic)
   // -------------------------------------------------------------------------
 
   pi.registerTool({
-    name: "converse_with_right_brain",
+    name: "consult_right_brain",
     label: "Consult Right Brain",
-    description: "Direct conversation with your right brain. Visible in thread.",
+    description:
+      "Ask your coordinating partner for analysis on a specific question. " +
+      "Returns structured output: analysis, suggested approach, and confidence.",
     parameters: Type.Object({
-      message: Type.String({ description: "What to ask" }),
+      question: Type.String({ description: "What to ask the right brain" }),
+      context: Type.Optional(Type.String({ description: "Additional context" })),
       model: Type.Optional(Type.String({ description: "Override model" })),
       persona: Type.Optional(Type.String({ description: "Override persona" })),
     }),
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const config = await Effect.runPromise(AppConfig);
-      const priorObservations = gatherObservations(ctx);
+      const priorBriefs = gatherBriefs(ctx);
 
-      const logData = logEvent("tool_consult_start", { message: params.message.slice(0, 200) });
-      pi.appendEntry(LOG_ENTRY, logData);
+      logEvent("tool_consult_start", {
+        question: params.question.slice(0, 200),
+      });
+
+      const priorText = priorBriefs
+        .slice(-3)
+        .map((b) => `[prior brief]: ${b.brief}`)
+        .join("\n\n");
+
+      const fullContext = params.context
+        ? `${params.context}\n\n${priorText}`
+        : priorText;
 
       const text = await runRightBrain(ctx, signal, Effect.gen(function* () {
         const rightBrain = yield* RightBrain;
-        const transcript = priorObservations.map((c) => `[right-brain]: ${c.commentary}`).join("\n\n");
-        const full = transcript
-          ? `${transcript}\n\n--- consult ---\n\n[left]: ${params.message}\n\nRespond as your own mind.`
-          : `[left]: ${params.message}\n\nRespond as your own mind.`;
-        return yield* rightBrain.respond(full, params.model ?? config.model, params.persona ?? config.persona);
+        return yield* rightBrain.consult(
+          params.question,
+          fullContext,
+          params.model ?? config.model,
+          params.persona ?? config.persona,
+        );
       }));
 
-      pi.appendEntry(OBSERVATION_ENTRY, { commentary: `[consult] ${text}`, timestamp: Date.now() });
+      // Persist as brief so future turns see it
+      pi.appendEntry(BRIEF_ENTRY, { brief: `[consult] ${text}`, timestamp: Date.now() });
 
-      pi.sendMessage(
-        {
-          customType: "right-brain",
-          content: `[consulted by left brain]\n${text}`,
-          display: true,
-        },
-        { deliverAs: "followUp", triggerTurn: false },
-      );
-
-      const logData2 = logEvent("tool_consult_end", { response: text.slice(0, 200) });
-      pi.appendEntry(LOG_ENTRY, logData2);
+      logEvent("tool_consult_end", {
+        response: text.slice(0, 300),
+      });
 
       return { content: [{ type: "text", text }], details: {} };
     },
@@ -320,19 +272,19 @@ export default function (pi: ExtensionAPI) {
       if (args.trim() === "off") {
         enabled = false;
         if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
-        ctx.ui.notify("Right brain disabled", "info");
+        ctx.ui.notify("Dual brain disabled", "info");
         return;
       }
       if (args.trim() === "on") {
         enabled = true;
-        ctx.ui.notify("Right brain enabled", "info");
+        ctx.ui.notify("Dual brain enabled", "info");
         return;
       }
 
-      const lastObs = getLastObservation(ctx);
+      const lastBrief = getLastBrief(ctx);
       ctx.ui.notify(
         `${config.model} | ${enabled ? "on" : "off"}` +
-          (lastObs ? ` | last: "${lastObs.slice(0, 40)}${lastObs.length > 40 ? "…" : ""}"` : ""),
+          (lastBrief ? ` | brief: "${lastBrief.slice(0, 40)}${lastBrief.length > 40 ? "…" : ""}"` : ""),
         "info",
       );
     },
@@ -347,15 +299,15 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("dual-brain-clear", {
-    description: "Clear observation history",
+    description: "Clear brief history",
     handler: async (_args, ctx) => {
       if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
-      ctx.ui.notify("History cleared", "info");
+      ctx.ui.notify("Brief history cleared", "info");
     },
   });
 
   // -------------------------------------------------------------------------
-  // session hooks
+  // Session hooks
   // -------------------------------------------------------------------------
 
   pi.on("session_start", async (_event, ctx) => {
@@ -367,8 +319,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     const config = await Effect.runPromise(AppConfig);
-    const logData = logEvent("session_start", { enabled, model: config.model });
-    pi.appendEntry(LOG_ENTRY, logData);
+    logEvent("session_start", { enabled, model: config.model });
 
     if (ctx.hasUI) {
       ctx.ui.notify(
@@ -379,8 +330,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (_event, _ctx) => {
-    const logData = logEvent("session_shutdown", { enabled });
-    pi.appendEntry(LOG_ENTRY, logData);
+    logEvent("session_shutdown", { enabled });
     pi.appendEntry(STATE_ENTRY, { enabled });
   });
 }
