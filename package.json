@@ -5,11 +5,12 @@
   "license": "MIT",
   "keywords": ["pi-package"],
   "type": "module",
+  "packageManager": "pnpm@10.10.0",
   "scripts": {
     "lint": "oxlint src",
     "format": "oxfmt src",
     "format:check": "oxfmt --check src",
-    "check": "tsc --noEmit && npm run lint"
+    "check": "tsc --noEmit && pnpm run lint"
   },
   "pi": {
     "extensions": [

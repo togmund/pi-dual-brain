@@ -8,16 +8,15 @@
  * generates commentary — shown in a widget and fed into left brain's
  * context on the next turn.
  *
- * They influence each other. You see both minds.
+ * State is persisted in session entries (survives /reload) and mirrored
+ * in-memory for fast access during the session.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { Type } from "@sinclair/typebox";
 import { Effect, Layer } from "effect";
 import { AppConfig } from "./Config.js";
 import {
-  Conversation,
-  ConversationLive,
   PiRuntime,
   RightBrain,
   DialogueEntry,
@@ -27,14 +26,20 @@ import { RightBrainLive } from "./RightBrain.js";
 
 const WIDGET_KEY = "dual-brain";
 const STATUS_KEY = "dual-brain";
+const STATE_ENTRY_TYPE = "dual-brain-state";
+const DIALOGUE_ENTRY_TYPE = "dual-brain-dialogue";
 
 // ---------------------------------------------------------------------------
-// Shared mutable state — survives across tool calls and events
+// In-memory mirror — fast access during the session
 // ---------------------------------------------------------------------------
 
 let enabled = true;
 let currentRightBrainComment: string | undefined;
 const dialogueHistory: DialogueEntryType[] = [];
+
+// ---------------------------------------------------------------------------
+// Persistence helpers
+// ---------------------------------------------------------------------------
 
 function recordEntry(entry: Omit<DialogueEntryType, "id" | "timestamp">) {
   dialogueHistory.push(new DialogueEntry(entry));
@@ -60,7 +65,41 @@ function getTranscript(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Layer wiring — RightBrain uses Effect for API calls; conversation is plain mutable
+// Hydrate from session — called once at session_start
+// ---------------------------------------------------------------------------
+
+function hydrateFromSession(ctx: ExtensionContext) {
+  for (const entry of ctx.sessionManager.getEntries()) {
+    if (entry.type !== "custom") continue;
+
+    if (entry.customType === STATE_ENTRY_TYPE) {
+      const data = entry.data as { enabled?: boolean };
+      if (typeof data.enabled === "boolean") enabled = data.enabled;
+    }
+
+    if (entry.customType === DIALOGUE_ENTRY_TYPE) {
+      const data = entry.data as {
+        from: "left" | "right";
+        to: "left" | "right";
+        content: string;
+        timestamp: number;
+      };
+      dialogueHistory.push(
+        new DialogueEntry({
+          from: data.from,
+          to: data.to,
+          content: data.content,
+        }),
+      );
+      if (data.from === "right") {
+        currentRightBrainComment = data.content;
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Effect layer wiring — RightBrain only (conversation is plain mutable)
 // ---------------------------------------------------------------------------
 
 function makeLayer(piCtx: ExtensionContext, signal: AbortSignal | undefined) {
@@ -68,7 +107,6 @@ function makeLayer(piCtx: ExtensionContext, signal: AbortSignal | undefined) {
     modelRegistry: piCtx.modelRegistry as any,
     signal,
   });
-
   return RightBrainLive.pipe(Layer.provide(PiRuntimeLive));
 }
 
@@ -159,6 +197,14 @@ export default function (pi: ExtensionAPI) {
       currentRightBrainComment = commentary;
       recordEntry({ from: "right", to: "left", content: commentary });
 
+      // Persist to session so it survives /reload
+      pi.appendEntry(DIALOGUE_ENTRY_TYPE, {
+        from: "right",
+        to: "left",
+        content: commentary,
+        timestamp: Date.now(),
+      });
+
       if (ctx.hasUI) {
         const theme = ctx.ui.theme;
         ctx.ui.setWidget(
@@ -242,6 +288,15 @@ export default function (pi: ExtensionAPI) {
         );
 
         recordEntry({ from: "right", to: "left", content: response });
+
+        // Persist consult to session
+        pi.appendEntry(DIALOGUE_ENTRY_TYPE, {
+          from: "right",
+          to: "left",
+          content: response,
+          timestamp: Date.now(),
+        });
+
         return response;
       }));
 
@@ -296,32 +351,27 @@ export default function (pi: ExtensionAPI) {
   });
 
   // -------------------------------------------------------------------------
-  // session_start — restore state
+  // session_start — hydrate from persisted entries
   // -------------------------------------------------------------------------
 
   pi.on("session_start", async (_event, ctx) => {
-    const config = await Effect.runPromise(AppConfig);
+    hydrateFromSession(ctx);
 
-    for (const entry of ctx.sessionManager.getEntries()) {
-      if (entry.type === "custom" && entry.customType === "dual-brain-state") {
-        const data = entry.data as { enabled?: boolean };
-        if (typeof data.enabled === "boolean") enabled = data.enabled;
-      }
-    }
+    const config = await Effect.runPromise(AppConfig);
 
     if (ctx.hasUI) {
       ctx.ui.notify(
-        `🧠 dual brain: ${config.model} — ${enabled ? "on" : "off"}  (/dual-brain off to disable)`,
+        `🧠 dual brain: ${config.model} — ${enabled ? "on" : "off"} (${dialogueHistory.length} turns restored)  (/dual-brain off to disable)`,
         enabled ? "info" : "warning",
       );
     }
   });
 
   // -------------------------------------------------------------------------
-  // session_shutdown — persist state
+  // session_shutdown — persist toggle state
   // -------------------------------------------------------------------------
 
   pi.on("session_shutdown", async (_event, _ctx) => {
-    pi.appendEntry("dual-brain-state", { enabled });
+    pi.appendEntry(STATE_ENTRY_TYPE, { enabled });
   });
 }
