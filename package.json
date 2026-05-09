@@ -1,7 +1,7 @@
 {
   "name": "pi-dual-brain",
   "version": "0.1.0",
-  "description": "A pi extension that gives your agent a double brain — two models that consult each other",
+  "description": "A pi extension that gives your agent a double brain",
   "license": "MIT",
   "keywords": ["pi-package"],
   "type": "module",
@@ -13,9 +13,7 @@
     "check": "tsc --noEmit && pnpm run lint"
   },
   "pi": {
-    "extensions": [
-      "./src/index.ts"
-    ]
+    "extensions": ["./src/index.ts"]
   },
   "dependencies": {
     "effect": "^3.14.0"
@@ -34,6 +32,7 @@
     "@effect/language-service": "^0.85.0",
     "oxfmt": "^0.44.0",
     "oxlint": "^0.16.0",
+    "typebox": "^1.1.38",
     "typescript": "^5.7.0"
   }
 }
