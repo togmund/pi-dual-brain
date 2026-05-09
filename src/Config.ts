@@ -4,11 +4,11 @@ import { Config, Effect } from "effect";
  * Environment configuration for the right brain.
  *
  * `RIGHT_BRAIN_MODEL` must be in `provider/model` format,
- * e.g. `"opencode-go/deepseek-v4-pro"`.
+ * e.g. `"opencode-go/minimax-m2.7"`.
  */
 export const AppConfig = Config.all({
   model: Config.string("RIGHT_BRAIN_MODEL").pipe(
-    Config.withDefault("opencode-go/deepseek-v4-pro"),
+    Config.withDefault("opencode-go/minimax-m2.7"),
   ),
   persona: Config.string("RIGHT_BRAIN_PERSONA").pipe(
     Config.withDefault(
