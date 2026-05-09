@@ -1,7 +1,7 @@
 import { completeSimple } from "@earendil-works/pi-ai";
 import type { Message } from "@earendil-works/pi-ai";
 import { Effect, Layer } from "effect";
-import { ConsultError, ModelNotFoundError, PiRuntime, RightBrain, type DialogueEntry } from "./Domain.js";
+import { ConsultError, ModelNotFoundError, PiRuntime, RightBrain } from "./Domain.js";
 
 function parseModelRef(ref: string): { provider: string; modelId: string } {
   const idx = ref.indexOf("/");
@@ -9,18 +9,22 @@ function parseModelRef(ref: string): { provider: string; modelId: string } {
   return { provider: ref.slice(0, idx), modelId: ref.slice(idx + 1) };
 }
 
-function toMessages(history: ReadonlyArray<DialogueEntry>): Message[] {
-  const messages: Message[] = [];
+function buildObservationPrompt(transcript: string, persona: string): Message[] {
+  const prompt =
+    `You are observing a conversation between a user and another AI (your left-brain partner).\n\n` +
+    `Your persona: ${persona}\n\n` +
+    `Below is the transcript of the most recent turn. Provide a brief, insightful commentary. ` +
+    `React to what was said, offer a different angle, point out blind spots, or suggest alternatives. ` +
+    `Be concise — one or two sentences. Do not repeat what was already said.\n\n` +
+    `<transcript>\n${transcript.slice(0, 12000)}\n</transcript>`;
 
-  for (const entry of history) {
-    messages.push({
-      role: entry.from === "left" ? "user" : "assistant",
-      content: [{ type: "text", text: entry.content }],
-      timestamp: entry.timestamp,
-    });
-  }
-
-  return messages;
+  return [
+    {
+      role: "user",
+      content: [{ type: "text", text: prompt }],
+      timestamp: Date.now(),
+    },
+  ];
 }
 
 export const RightBrainLive = Layer.effect(
@@ -29,7 +33,7 @@ export const RightBrainLive = Layer.effect(
     const pi = yield* PiRuntime;
 
     return RightBrain.of({
-      ask: (message, history, modelRef, persona) =>
+      observe: (transcript, modelRef, persona) =>
         Effect.gen(function* () {
           const { provider, modelId } = parseModelRef(modelRef);
 
@@ -49,23 +53,13 @@ export const RightBrainLive = Layer.effect(
             catch: (e) => new ConsultError({ message: `Auth failed: ${String(e)}` }),
           });
 
-          const messages = toMessages(history);
+          const messages = buildObservationPrompt(transcript, persona);
 
           const response = yield* Effect.tryPromise({
             try: () =>
               completeSimple(
                 model as any,
-                {
-                  systemPrompt: persona,
-                  messages: [
-                    ...messages,
-                    {
-                      role: "user",
-                      content: [{ type: "text", text: message }],
-                      timestamp: Date.now(),
-                    },
-                  ],
-                },
+                { messages },
                 {
                   apiKey: auth.apiKey,
                   headers: auth.headers,

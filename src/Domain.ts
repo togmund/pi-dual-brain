@@ -45,7 +45,7 @@ export class ConsultError extends Data.TaggedError("ConsultError")<{
 }> {}
 
 // ---------------------------------------------------------------------------
-// Pi context bridge — injected at the edge of every Effect program
+// Pi context bridge
 // ---------------------------------------------------------------------------
 
 export interface PiRuntime {
@@ -63,9 +63,8 @@ export const PiRuntime = Context.GenericTag<PiRuntime>("PiRuntime");
 // ---------------------------------------------------------------------------
 
 export interface RightBrain {
-  readonly ask: (
-    message: string,
-    history: ReadonlyArray<DialogueEntry>,
+  readonly observe: (
+    transcript: string,
     modelRef: string,
     persona: string,
   ) => Effect.Effect<string, ConsultError | ModelNotFoundError>;
@@ -77,6 +76,7 @@ export interface Conversation {
   readonly record: (entry: Omit<DialogueEntry, "id" | "timestamp">) => Effect.Effect<void, never>;
   readonly getHistory: Effect.Effect<ReadonlyArray<DialogueEntry>, never>;
   readonly getTranscript: Effect.Effect<string, never>;
+  readonly getLastRightBrainComment: Effect.Effect<string | undefined, never>;
   readonly clear: Effect.Effect<void, never>;
 }
 
@@ -95,6 +95,15 @@ export const ConversationLive = Layer.effect(
 
       getTranscript: Ref.get(entries).pipe(
         Effect.map((es) => es.map((e) => `[${e.from}→${e.to}]: ${e.content}`).join("\n\n")),
+      ),
+
+      getLastRightBrainComment: Ref.get(entries).pipe(
+        Effect.map((es) => {
+          for (let i = es.length - 1; i >= 0; i--) {
+            if (es[i].from === "right") return es[i].content;
+          }
+          return undefined;
+        }),
       ),
 
       clear: Ref.set(entries, []),
