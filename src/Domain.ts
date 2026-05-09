@@ -64,6 +64,13 @@ export interface RightBrain {
     modelRef: string,
     persona: string,
   ) => Effect.Effect<string, ConsultError | ModelNotFoundError>;
+
+  /** Respond to the user's prompt BEFORE the left brain speaks */
+  readonly respond: (
+    context: string,
+    modelRef: string,
+    persona: string,
+  ) => Effect.Effect<string, ConsultError | ModelNotFoundError>;
 }
 
 export const RightBrain = Context.GenericTag<RightBrain>("RightBrain");

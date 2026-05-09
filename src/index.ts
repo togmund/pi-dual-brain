@@ -1,16 +1,16 @@
 /**
- * pi-dual-brain — visible speaker edition
+ * pi-dual-brain — participation edition
  *
- * Right brain appears as a distinct speaker in the conversation thread,
- * not just a widget. Its thoughts are persistent messages you can scroll
- * back to in /tree. Structured logging lets both brains inspect the flow.
+ * Right brain speaks BEFORE the left brain, not after.
+ * The left brain generates in response to BOTH the user and the right brain.
  *
- * Architecture:
- *   - Right brain observes turn → sends custom message (visible thread entry)
- *   - Left brain sees prior observation in system prompt
- *   - Structured log entries capture both sides of the flow
- *   - /dual-brain-logs command tails recent events
- *   - tail_dual_brain_logs tool lets left brain self-inspect
+ * Flow per turn:
+ *   1. User sends message
+ *   2. before_agent_start: right brain reads user message + prior context,
+ *      forms its own thought, sends it as a visible message
+ *   3. left brain's system prompt includes right brain's thought;
+ *      generates response shaped by that dialogue
+ *   4. agent_end: right brain observes the full turn, persists for next round
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -25,7 +25,6 @@ import { AppConfig } from "./Config.js";
 import { PiRuntime, RightBrain } from "./Domain.js";
 import { RightBrainLive } from "./RightBrain.js";
 
-const WIDGET_KEY = "dual-brain";
 const STATUS_KEY = "dual-brain";
 const STATE_ENTRY = "dual-brain-state";
 const OBSERVATION_ENTRY = "dual-brain-observation";
@@ -79,10 +78,6 @@ function gatherObservations(ctx: ExtensionContext): Array<{ commentary: string; 
   return out;
 }
 
-// ---------------------------------------------------------------------------
-// Structured logging — both brains write here
-// ---------------------------------------------------------------------------
-
 function logEvent(event: string, data: Record<string, unknown>) {
   const line = JSON.stringify({ t: Date.now(), event, ...data }) + "\n";
   try {
@@ -90,7 +85,6 @@ function logEvent(event: string, data: Record<string, unknown>) {
   } catch {
     // ignore
   }
-  // Also persist in session for /tree visibility
   return { t: Date.now(), event, ...data };
 }
 
@@ -100,15 +94,7 @@ function readLogs(limit: number = 20): string {
   return lines.slice(-limit).join("\n");
 }
 
-// ---------------------------------------------------------------------------
-// Extension
-// ---------------------------------------------------------------------------
-
 export default function (pi: ExtensionAPI) {
-  // -------------------------------------------------------------------------
-  // Message renderer — right brain gets its own speech bubble style
-  // -------------------------------------------------------------------------
-
   pi.registerMessageRenderer("right-brain", (message, options, theme) => {
     let text: string;
     if (typeof message.content === "string") {
@@ -136,33 +122,83 @@ export default function (pi: ExtensionAPI) {
   });
 
   // -------------------------------------------------------------------------
-  // before_agent_start — left brain sees right brain's prior observation
+  // before_agent_start — right brain PARTICIPATES before left brain speaks
   // -------------------------------------------------------------------------
 
   pi.on("before_agent_start", async (event, ctx) => {
     if (!enabled) return {};
 
-    const lastObservation = getLastObservation(ctx);
-    if (!lastObservation) return {};
+    const config = await Effect.runPromise(AppConfig);
+    const priorObservations = gatherObservations(ctx);
 
-    const logData = logEvent("before_agent_start", {
-      hasObservation: true,
-      observationPreview: lastObservation.slice(0, 100),
+    // The user's latest prompt
+    const userPrompt = event.prompt ?? "";
+
+    if (!userPrompt) {
+      logEvent("before_agent_start", { skipped: "no user prompt" });
+      return {};
+    }
+
+    // Build context: prior right-brain thoughts + current user prompt
+    const priorText = priorObservations.map((c) => `[right-brain]: ${c.commentary}`).join("\n\n");
+    const context = priorText
+      ? `${priorText}\n\n--- new turn ---\n\n[user]: ${userPrompt}`
+      : `[user]: ${userPrompt}`;
+
+    let commentary: string;
+    try {
+      commentary = await runRightBrain(ctx, undefined, Effect.gen(function* () {
+        const rightBrain = yield* RightBrain;
+        return yield* rightBrain.respond(context, config.model, config.persona);
+      }));
+    } catch (e) {
+      logEvent("before_agent_start_error", { error: String(e) });
+      return {};
+    }
+
+    // Persist this thought
+    pi.appendEntry(OBSERVATION_ENTRY, { commentary, timestamp: Date.now() });
+
+    // Log
+    const logData = logEvent("before_agent_start_participation", {
+      commentary: commentary.slice(0, 200),
+      model: config.model,
     });
     pi.appendEntry(LOG_ENTRY, logData);
 
+    // Send as visible message BEFORE left brain speaks
+    pi.sendMessage(
+      {
+        customType: "right-brain",
+        content: commentary,
+        display: true,
+      },
+      { deliverAs: "followUp", triggerTurn: false },
+    );
+
+    if (ctx.hasUI) {
+      ctx.ui.setStatus(
+        STATUS_KEY,
+        `🧠 ${commentary.slice(0, 40)}${commentary.length > 40 ? "…" : ""}`,
+      );
+    }
+
+    // Inject into left brain's system prompt so it can respond to this peer
     return {
       systemPrompt:
         event.systemPrompt +
-        `\n\n## Your Right Brain's Prior Thought\n` +
-        `Your right hemisphere (a distinct model with its own perspective) had this to say after the last turn:\n\n` +
-        `> ${lastObservation}\n\n` +
-        `You may build on it, disagree with it, or ignore it. It will think again after you respond.`,
+        `\n\n## Your Right Brain's Take (this turn)\n` +
+        `Your right hemisphere — a distinct model with its own perspective — ` +
+        `has already weighed in on the user's message:\n\n` +
+        `> ${commentary}\n\n` +
+        `You are generating your response AFTER reading this. You may agree, ` +
+        `disagree, build on it, or ignore it. But you are not speaking into a ` +
+        `void — your right brain is already in the room.`,
     };
   });
 
   // -------------------------------------------------------------------------
-  // agent_end — right brain observes, logs, speaks in thread
+  // agent_end — right brain observes the full turn for next-round context
   // -------------------------------------------------------------------------
 
   pi.on("agent_end", async (event, ctx) => {
@@ -183,27 +219,14 @@ export default function (pi: ExtensionAPI) {
       const rightBrain = yield* RightBrain;
       const commentary = yield* rightBrain.observe(transcript, config.model, config.persona);
 
-      // Persist as observation
       pi.appendEntry(OBSERVATION_ENTRY, { commentary, timestamp: Date.now() });
 
-      // Log the event
       const logData = logEvent("agent_end_observation", {
         commentary: commentary.slice(0, 200),
         model: config.model,
       });
       pi.appendEntry(LOG_ENTRY, logData);
 
-      // Speak in the conversation thread as a visible message
-      pi.sendMessage(
-        {
-          customType: "right-brain",
-          content: commentary,
-          display: true,
-        },
-        { deliverAs: "followUp", triggerTurn: false },
-      );
-
-      // Brief status only — the visible thread message is the real presence
       if (ctx.hasUI) {
         ctx.ui.setStatus(
           STATUS_KEY,
@@ -217,15 +240,15 @@ export default function (pi: ExtensionAPI) {
   });
 
   // -------------------------------------------------------------------------
-  // Tool — explicit dialogue (left brain → right brain)
+  // Tool — explicit dialogue
   // -------------------------------------------------------------------------
 
   pi.registerTool({
     name: "converse_with_right_brain",
     label: "Consult Right Brain",
-    description: "Have a direct conversation with your right brain. Visible in the thread.",
+    description: "Direct conversation with your right brain. Visible in thread.",
     parameters: Type.Object({
-      message: Type.String({ description: "What to ask the right brain" }),
+      message: Type.String({ description: "What to ask" }),
       model: Type.Optional(Type.String({ description: "Override model" })),
       persona: Type.Optional(Type.String({ description: "Override persona" })),
     }),
@@ -234,21 +257,18 @@ export default function (pi: ExtensionAPI) {
       const config = await Effect.runPromise(AppConfig);
       const priorObservations = gatherObservations(ctx);
 
-      const logData = logEvent("tool_consult_start", {
-        message: params.message.slice(0, 200),
-      });
+      const logData = logEvent("tool_consult_start", { message: params.message.slice(0, 200) });
       pi.appendEntry(LOG_ENTRY, logData);
 
       const text = await runRightBrain(ctx, signal, Effect.gen(function* () {
         const rightBrain = yield* RightBrain;
         const transcript = priorObservations.map((c) => `[right-brain]: ${c.commentary}`).join("\n\n");
         const full = transcript
-          ? `${transcript}\n\n--- direct consult ---\n\n[left]: ${params.message}\n\nRespond as your own mind. Do not evaluate the left brain's question — answer it from your own perspective.`
+          ? `${transcript}\n\n--- consult ---\n\n[left]: ${params.message}\n\nRespond as your own mind.`
           : `[left]: ${params.message}\n\nRespond as your own mind.`;
-        return yield* rightBrain.observe(full, params.model ?? config.model, params.persona ?? config.persona);
+        return yield* rightBrain.respond(full, params.model ?? config.model, params.persona ?? config.persona);
       }));
 
-      // Persist and speak
       pi.appendEntry(OBSERVATION_ENTRY, { commentary: `[consult] ${text}`, timestamp: Date.now() });
 
       pi.sendMessage(
@@ -260,9 +280,7 @@ export default function (pi: ExtensionAPI) {
         { deliverAs: "followUp", triggerTurn: false },
       );
 
-      const logData2 = logEvent("tool_consult_end", {
-        response: text.slice(0, 200),
-      });
+      const logData2 = logEvent("tool_consult_end", { response: text.slice(0, 200) });
       pi.appendEntry(LOG_ENTRY, logData2);
 
       return { content: [{ type: "text", text }], details: {} };
@@ -270,15 +288,15 @@ export default function (pi: ExtensionAPI) {
   });
 
   // -------------------------------------------------------------------------
-  // Tool — tail logs (for self-inspection)
+  // Tool — tail logs
   // -------------------------------------------------------------------------
 
   pi.registerTool({
     name: "tail_dual_brain_logs",
     label: "Tail Dual Brain Logs",
-    description: "Read recent structured log entries to understand what both brains are doing.",
+    description: "Read recent structured log entries.",
     parameters: Type.Object({
-      lines: Type.Optional(Type.Number({ description: "Number of log lines", default: 20 })),
+      lines: Type.Optional(Type.Number({ description: "Number of lines", default: 20 })),
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
@@ -301,10 +319,7 @@ export default function (pi: ExtensionAPI) {
 
       if (args.trim() === "off") {
         enabled = false;
-        if (ctx.hasUI) {
-          ctx.ui.setWidget(WIDGET_KEY, undefined);
-          ctx.ui.setStatus(STATUS_KEY, undefined);
-        }
+        if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
         ctx.ui.notify("Right brain disabled", "info");
         return;
       }
@@ -316,7 +331,7 @@ export default function (pi: ExtensionAPI) {
 
       const lastObs = getLastObservation(ctx);
       ctx.ui.notify(
-        `Right brain: ${config.model} | ${enabled ? "on" : "off"}` +
+        `${config.model} | ${enabled ? "on" : "off"}` +
           (lastObs ? ` | last: "${lastObs.slice(0, 40)}${lastObs.length > 40 ? "…" : ""}"` : ""),
         "info",
       );
@@ -324,7 +339,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("dual-brain-logs", {
-    description: "Tail recent dual-brain structured logs",
+    description: "Tail recent structured logs",
     handler: async (_args, ctx) => {
       const logs = readLogs(20);
       ctx.ui.notify(`Logs: ${logs.slice(0, 200)}`, "info");
@@ -334,16 +349,13 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("dual-brain-clear", {
     description: "Clear observation history",
     handler: async (_args, ctx) => {
-      if (ctx.hasUI) {
-        ctx.ui.setWidget(WIDGET_KEY, undefined);
-        ctx.ui.setStatus(STATUS_KEY, undefined);
-      }
-      ctx.ui.notify("Observation history cleared", "info");
+      if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
+      ctx.ui.notify("History cleared", "info");
     },
   });
 
   // -------------------------------------------------------------------------
-  // session_start
+  // session hooks
   // -------------------------------------------------------------------------
 
   pi.on("session_start", async (_event, ctx) => {
@@ -360,15 +372,11 @@ export default function (pi: ExtensionAPI) {
 
     if (ctx.hasUI) {
       ctx.ui.notify(
-        `🧠 dual brain: ${config.model} — ${enabled ? "on" : "off"}  (/dual-brain off to disable)`,
+        `🧠 dual brain: ${config.model} — ${enabled ? "on" : "off"}`,
         enabled ? "info" : "warning",
       );
     }
   });
-
-  // -------------------------------------------------------------------------
-  // session_shutdown
-  // -------------------------------------------------------------------------
 
   pi.on("session_shutdown", async (_event, _ctx) => {
     const logData = logEvent("session_shutdown", { enabled });
