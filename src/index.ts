@@ -9,16 +9,6 @@
  * context on the next turn.
  *
  * They influence each other. You see both minds.
- *
- * Configuration:
- *   RIGHT_BRAIN_MODEL=provider/model   (default: opencode-go/deepseek-v4-pro)
- *   RIGHT_BRAIN_PERSONA="..."          (optional)
- *
- * Commands:
- *   /dual-brain              Show status
- *   /dual-brain off          Disable right-brain observations
- *   /dual-brain on           Re-enable
- *   /dual-brain-clear        Clear internal dialogue history
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -30,7 +20,8 @@ import {
   ConversationLive,
   PiRuntime,
   RightBrain,
-  type DialogueEntry,
+  DialogueEntry,
+  type DialogueEntry as DialogueEntryType,
 } from "./Domain.js";
 import { RightBrainLive } from "./RightBrain.js";
 
@@ -38,7 +29,38 @@ const WIDGET_KEY = "dual-brain";
 const STATUS_KEY = "dual-brain";
 
 // ---------------------------------------------------------------------------
-// Layer wiring
+// Shared mutable state — survives across tool calls and events
+// ---------------------------------------------------------------------------
+
+let enabled = true;
+let currentRightBrainComment: string | undefined;
+const dialogueHistory: DialogueEntryType[] = [];
+
+function recordEntry(entry: Omit<DialogueEntryType, "id" | "timestamp">) {
+  dialogueHistory.push(new DialogueEntry(entry));
+}
+
+function getHistory(): ReadonlyArray<DialogueEntryType> {
+  return dialogueHistory;
+}
+
+function getLastRightBrainComment(): string | undefined {
+  for (let i = dialogueHistory.length - 1; i >= 0; i--) {
+    if (dialogueHistory[i].from === "right") return dialogueHistory[i].content;
+  }
+  return undefined;
+}
+
+function clearHistory() {
+  dialogueHistory.length = 0;
+}
+
+function getTranscript(): string {
+  return dialogueHistory.map((e) => `[${e.from}→${e.to}]: ${e.content}`).join("\n\n");
+}
+
+// ---------------------------------------------------------------------------
+// Layer wiring — RightBrain uses Effect for API calls; conversation is plain mutable
 // ---------------------------------------------------------------------------
 
 function makeLayer(piCtx: ExtensionContext, signal: AbortSignal | undefined) {
@@ -47,16 +69,13 @@ function makeLayer(piCtx: ExtensionContext, signal: AbortSignal | undefined) {
     signal,
   });
 
-  return RightBrainLive.pipe(
-    Layer.provide(PiRuntimeLive),
-    Layer.merge(ConversationLive),
-  );
+  return RightBrainLive.pipe(Layer.provide(PiRuntimeLive));
 }
 
-function run<A, E>(
+function runRightBrain<A, E>(
   piCtx: ExtensionContext,
   signal: AbortSignal | undefined,
-  effect: Effect.Effect<A, E, RightBrain | Conversation>,
+  effect: Effect.Effect<A, E, RightBrain>,
 ): Promise<A> {
   return effect.pipe(Effect.provide(makeLayer(piCtx, signal)), Effect.runPromise);
 }
@@ -78,7 +97,7 @@ function extractTextContent(content: unknown): string {
 }
 
 function buildTurnTranscript(
-  entries: ReadonlyArray<DialogueEntry>,
+  entries: ReadonlyArray<DialogueEntryType>,
   turnMessages: Array<{ role: string; content: string }>,
 ): string {
   const prior = entries.map((e) => `[${e.from}]: ${e.content}`).join("\n\n");
@@ -91,9 +110,6 @@ function buildTurnTranscript(
 // ---------------------------------------------------------------------------
 
 export default function (pi: ExtensionAPI) {
-  let enabled = true;
-  let currentRightBrainComment: string | undefined;
-
   // -------------------------------------------------------------------------
   // before_agent_start — inject right brain's prior comment into context
   // -------------------------------------------------------------------------
@@ -127,12 +143,11 @@ export default function (pi: ExtensionAPI) {
         content: extractTextContent(m.content),
       }));
 
-    // Fire and forget — don't block the UI
-    run(ctx, undefined, Effect.gen(function* () {
+    // Fire and forget
+    runRightBrain(ctx, undefined, Effect.gen(function* () {
       const rightBrain = yield* RightBrain;
-      const conv = yield* Conversation;
 
-      const history = yield* conv.getHistory;
+      const history = getHistory();
       const transcript = buildTurnTranscript(history, turnMessages);
 
       const commentary = yield* rightBrain.observe(
@@ -142,12 +157,7 @@ export default function (pi: ExtensionAPI) {
       );
 
       currentRightBrainComment = commentary;
-
-      yield* conv.record({
-        from: "right",
-        to: "left",
-        content: commentary,
-      });
+      recordEntry({ from: "right", to: "left", content: commentary });
 
       if (ctx.hasUI) {
         const theme = ctx.ui.theme;
@@ -165,12 +175,12 @@ export default function (pi: ExtensionAPI) {
         );
       }
     })).catch(() => {
-      // Silently ignore right-brain failures — left brain must not be blocked
+      // Silently ignore right-brain failures
     });
   });
 
   // -------------------------------------------------------------------------
-  // Introspection tool — so the left brain can see its own state
+  // Introspection tool
   // -------------------------------------------------------------------------
 
   pi.registerTool({
@@ -179,29 +189,19 @@ export default function (pi: ExtensionAPI) {
     description: "Check if the dual-brain extension is active, what model the right brain uses, and what it last said.",
     parameters: Type.Object({}),
 
-    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
       const config = await Effect.runPromise(AppConfig);
-
-      const history = await run(ctx, undefined, Effect.gen(function* () {
-        const conv = yield* Conversation;
-        return yield* conv.getHistory;
-      }));
-
-      const lastRight = history.length > 0
-        ? [...history].reverse().find((e) => e.from === "right")
-        : undefined;
-
-      const transcript = history.map((e) => `[${e.from}→${e.to}]: ${e.content}`).join("\n\n");
+      const lastRight = getLastRightBrainComment();
 
       return {
-        content: [{ type: "text", text: `Dual brain is ${enabled ? "enabled" : "disabled"}.\nRight brain model: ${config.model}\nTurns in history: ${history.length}\nLast right-brain thought: ${lastRight?.content ?? "(none yet)"}` }],
+        content: [{ type: "text", text: `Dual brain is ${enabled ? "enabled" : "disabled"}.\nRight brain model: ${config.model}\nTurns in history: ${dialogueHistory.length}\nLast right-brain thought: ${lastRight ?? "(none yet)"}` }],
         details: {
           enabled,
           model: config.model,
           persona: config.persona,
-          turnCount: history.length,
-          lastCommentary: lastRight?.content ?? null,
-          transcript,
+          turnCount: dialogueHistory.length,
+          lastCommentary: lastRight ?? null,
+          transcript: getTranscript(),
         },
       };
     },
@@ -224,7 +224,27 @@ export default function (pi: ExtensionAPI) {
     parameters: ConsultParams,
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const text = await run(ctx, signal, deepConsult(params));
+      const config = await Effect.runPromise(AppConfig);
+
+      const modelRef = params.model ?? config.model;
+      const persona = params.persona ?? config.persona;
+
+      recordEntry({ from: "left", to: "right", content: params.message });
+
+      const text = await runRightBrain(ctx, signal, Effect.gen(function* () {
+        const rightBrain = yield* RightBrain;
+        const transcript = getTranscript();
+
+        const response = yield* rightBrain.observe(
+          `${transcript}\n\n--- current consult ---\n\n[left]: ${params.message}`,
+          modelRef,
+          persona,
+        );
+
+        recordEntry({ from: "right", to: "left", content: response });
+        return response;
+      }));
+
       return { content: [{ type: "text", text }], details: {} };
     },
   });
@@ -255,14 +275,8 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const history = await run(ctx, undefined, Effect.gen(function* () {
-        const conv = yield* Conversation;
-        return yield* conv.getHistory;
-      }));
-
-      const status = enabled ? "enabled" : "disabled";
       ctx.ui.notify(
-        `Right brain: ${config.model} | ${status} | ${history.length} turns`,
+        `Right brain: ${config.model} | ${enabled ? "enabled" : "disabled"} | ${dialogueHistory.length} turns`,
         "info",
       );
     },
@@ -271,10 +285,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("dual-brain-clear", {
     description: "Clear the internal dialogue history",
     handler: async (_args, ctx) => {
-      await run(ctx, undefined, Effect.gen(function* () {
-        const conv = yield* Conversation;
-        yield* conv.clear;
-      }));
+      clearHistory();
       currentRightBrainComment = undefined;
       if (ctx.hasUI) {
         ctx.ui.setWidget(WIDGET_KEY, undefined);
@@ -313,40 +324,4 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async (_event, _ctx) => {
     pi.appendEntry("dual-brain-state", { enabled });
   });
-}
-
-// ---------------------------------------------------------------------------
-// Deep consult (explicit tool)
-// ---------------------------------------------------------------------------
-
-function deepConsult(params: {
-  message: string;
-  model?: string;
-  persona?: string;
-}): Effect.Effect<string, never, RightBrain | Conversation> {
-  return Effect.gen(function* () {
-    const config = yield* AppConfig;
-    const rightBrain = yield* RightBrain;
-    const conv = yield* Conversation;
-
-    const modelRef = params.model ?? config.model;
-    const persona = params.persona ?? config.persona;
-
-    yield* conv.record({ from: "left", to: "right", content: params.message });
-
-    const history = yield* conv.getHistory;
-    const transcript = history.map((e) => `[${e.from}]: ${e.content}`).join("\n\n");
-
-    const response = yield* rightBrain.observe(
-      `${transcript}\n\n--- current consult ---\n\n[left]: ${params.message}`,
-      modelRef,
-      persona,
-    );
-
-    yield* conv.record({ from: "right", to: "left", content: response });
-
-    return response;
-  }).pipe(
-    Effect.catchAll((error) => Effect.succeed(`Error consulting right brain: ${error.message}`)),
-  );
 }
