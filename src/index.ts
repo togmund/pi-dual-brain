@@ -170,6 +170,44 @@ export default function (pi: ExtensionAPI) {
   });
 
   // -------------------------------------------------------------------------
+  // Introspection tool — so the left brain can see its own state
+  // -------------------------------------------------------------------------
+
+  pi.registerTool({
+    name: "check_dual_brain_status",
+    label: "Check Dual Brain Status",
+    description: "Check if the dual-brain extension is active, what model the right brain uses, and what it last said.",
+    parameters: Type.Object({}),
+
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      const config = await Effect.runPromise(AppConfig);
+
+      const history = await run(ctx, undefined, Effect.gen(function* () {
+        const conv = yield* Conversation;
+        return yield* conv.getHistory;
+      }));
+
+      const lastRight = history.length > 0
+        ? [...history].reverse().find((e) => e.from === "right")
+        : undefined;
+
+      const transcript = history.map((e) => `[${e.from}→${e.to}]: ${e.content}`).join("\n\n");
+
+      return {
+        content: [{ type: "text", text: `Dual brain is ${enabled ? "enabled" : "disabled"}.\nRight brain model: ${config.model}\nTurns in history: ${history.length}\nLast right-brain thought: ${lastRight?.content ?? "(none yet)"}` }],
+        details: {
+          enabled,
+          model: config.model,
+          persona: config.persona,
+          turnCount: history.length,
+          lastCommentary: lastRight?.content ?? null,
+          transcript,
+        },
+      };
+    },
+  });
+
+  // -------------------------------------------------------------------------
   // Explicit consult tool
   // -------------------------------------------------------------------------
 
