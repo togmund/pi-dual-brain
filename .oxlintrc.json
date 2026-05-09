@@ -1,0 +1,7 @@
+{
+  "rules": {
+    "no-explicit-any": "warn",
+    "no-console": "off"
+  },
+  "ignorePatterns": ["node_modules/", "dist/"]
+}
