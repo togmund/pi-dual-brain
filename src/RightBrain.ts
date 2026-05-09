@@ -53,6 +53,10 @@ export const RightBrainLive = Layer.effect(
             catch: (e) => new ConsultError({ message: `Auth failed: ${String(e)}` }),
           });
 
+          if (!auth.ok) {
+            return yield* new ConsultError({ message: auth.error });
+          }
+
           const messages = buildObservationPrompt(transcript, persona);
 
           const response = yield* Effect.tryPromise({
@@ -64,7 +68,6 @@ export const RightBrainLive = Layer.effect(
                   apiKey: auth.apiKey,
                   headers: auth.headers,
                   signal: pi.signal,
-                  ...(model.reasoning ? { reasoning: "minimal" as const } : {}),
                 },
               ),
             catch: (e) => new ConsultError({ message: String(e) }),

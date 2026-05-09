@@ -1,13 +1,6 @@
 import { Context, Data, Effect, Layer, Ref, Schema } from "effect";
 
 // ---------------------------------------------------------------------------
-// Branded IDs
-// ---------------------------------------------------------------------------
-
-export const EntryId = Schema.String.pipe(Schema.brand("EntryId"));
-export type EntryId = typeof EntryId.Type;
-
-// ---------------------------------------------------------------------------
 // Domain types
 // ---------------------------------------------------------------------------
 
@@ -15,7 +8,7 @@ export const Brain = Schema.Literal("left", "right");
 export type Brain = typeof Brain.Type;
 
 export class DialogueEntry extends Schema.Class<DialogueEntry>("DialogueEntry")({
-  id: EntryId,
+  id: Schema.String,
   from: Brain,
   to: Brain,
   content: Schema.String,
@@ -50,8 +43,11 @@ export class ConsultError extends Data.TaggedError("ConsultError")<{
 
 export interface PiRuntime {
   readonly modelRegistry: {
-    find: (provider: string, model: string) => { baseUrl: string; provider: string; id: string } | undefined;
-    getApiKeyAndHeaders: (model: unknown) => Promise<{ apiKey: string; headers: Record<string, string> }>;
+    find: (provider: string, model: string) => unknown | undefined;
+    getApiKeyAndHeaders: (model: unknown) => Promise<
+      | { ok: true; apiKey?: string; headers?: Record<string, string> }
+      | { ok: false; error: string }
+    >;
   };
   readonly signal?: AbortSignal;
 }

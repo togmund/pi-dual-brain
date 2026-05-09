@@ -26,7 +26,7 @@ import { Type } from "typebox";
 import { Effect, Layer } from "effect";
 import { AppConfig } from "./Config.js";
 import {
-  type Conversation,
+  Conversation,
   ConversationLive,
   PiRuntime,
   RightBrain,
@@ -43,7 +43,7 @@ const STATUS_KEY = "dual-brain";
 
 function makeLayer(piCtx: ExtensionContext, signal: AbortSignal | undefined) {
   const PiRuntimeLive = Layer.succeed(PiRuntime, {
-    modelRegistry: piCtx.modelRegistry,
+    modelRegistry: piCtx.modelRegistry as any,
     signal,
   });
 
@@ -64,6 +64,18 @@ function run<A, E>(
 // ---------------------------------------------------------------------------
 // Transcript builder
 // ---------------------------------------------------------------------------
+
+function extractTextContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const parts: string[] = [];
+  for (const part of content) {
+    if (!part || typeof part !== "object") continue;
+    const p = part as { type?: string; text?: string };
+    if (p.type === "text" && typeof p.text === "string") parts.push(p.text);
+  }
+  return parts.join("\n");
+}
 
 function buildTurnTranscript(
   entries: ReadonlyArray<DialogueEntry>,
@@ -108,16 +120,12 @@ export default function (pi: ExtensionAPI) {
 
     const config = await Effect.runPromise(AppConfig);
 
-    const turnMessages = event.messages.map((m) => ({
-      role: m.role,
-      content:
-        typeof m.content === "string"
-          ? m.content
-          : m.content
-              .filter((c) => c.type === "text")
-              .map((c) => (c as { text: string }).text)
-              .join("\n"),
-    }));
+    const turnMessages = (event.messages as any[])
+      .filter((m: any) => m.content !== undefined)
+      .map((m: any) => ({
+        role: m.role as string,
+        content: extractTextContent(m.content),
+      }));
 
     // Fire and forget — don't block the UI
     run(ctx, undefined, Effect.gen(function* () {
@@ -179,7 +187,7 @@ export default function (pi: ExtensionAPI) {
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const text = await run(ctx, signal, deepConsult(params));
-      return { content: [{ type: "text", text }] };
+      return { content: [{ type: "text", text }], details: {} };
     },
   });
 
@@ -234,7 +242,7 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.setWidget(WIDGET_KEY, undefined);
         ctx.ui.setStatus(STATUS_KEY, undefined);
       }
-      ctx.ui.notify("Dialogue history cleared", "success");
+      ctx.ui.notify("Dialogue history cleared", "info");
     },
   });
 
