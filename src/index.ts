@@ -112,6 +112,12 @@ export default function (pi: ExtensionAPI) {
       ? `${priorText}\n\n--- new turn ---\n\n[user]: ${userPrompt}`
       : `[user]: ${userPrompt}`;
 
+    // Immediate feedback: show activity before the blocking call
+    if (ctx.hasUI) {
+      ctx.ui.setStatus(STATUS_KEY, "🧠 right brain reading...");
+    }
+
+    const startTime = Date.now();
     let brief: string;
     try {
       brief = await runRightBrain(ctx, undefined, Effect.gen(function* () {
@@ -119,9 +125,13 @@ export default function (pi: ExtensionAPI) {
         return yield* rightBrain.brief(context, config.model, config.persona);
       }));
     } catch (e) {
-      logEvent("before_agent_start_error", { error: String(e) });
+      logEvent("before_agent_start_error", { error: String(e), elapsedMs: Date.now() - startTime });
+      if (ctx.hasUI) {
+        ctx.ui.setStatus(STATUS_KEY, "🧠 right brain error");
+      }
       return {};
     }
+    const elapsedMs = Date.now() - startTime;
 
     // Persist brief
     pi.appendEntry(BRIEF_ENTRY, { brief, timestamp: Date.now() });
@@ -129,6 +139,7 @@ export default function (pi: ExtensionAPI) {
     logEvent("before_agent_start_brief", {
       brief: brief.slice(0, 300),
       model: config.model,
+      elapsedMs,
     });
 
     if (ctx.hasUI) {
